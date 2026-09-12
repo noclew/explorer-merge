@@ -8,6 +8,8 @@ No installer. No background service. No third-party runtime. No network access. 
 
 <img src="assets/ExplorerMerge-character.png" width="160" alt="Explorer Merge character holding a folder">
 
+[紹介ページ / App page](https://www.aoe1928.com/apps/)
+
 ## 日本語
 
 散らばったエクスプローラーを、クリック1回で1つのウィンドウにまとめます。

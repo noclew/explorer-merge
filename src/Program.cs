@@ -10,7 +10,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("Explorer Merge")]
 [assembly: System.Reflection.AssemblyDescription("Merge File Explorer windows into native tabs. No installation or background service.")]
-[assembly: System.Reflection.AssemblyVersion("0.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.2.1.0")]
 namespace ExplorerMerge
 {
     static class Program
