@@ -27,6 +27,7 @@ namespace ExplorerMerge
         [DllImport("user32.dll", SetLastError = true)] internal static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
         [DllImport("user32.dll")] internal static extern bool ShowWindow(IntPtr hwnd, int command);
         [DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr hwnd);
+        [DllImport("user32.dll")] internal static extern bool IsZoomed(IntPtr hwnd);
         [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(IntPtr hwnd);
         [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out int value, int size);
         [DllImport("shell32.dll")] internal static extern int SHGetIDListFromObject([MarshalAs(UnmanagedType.IUnknown)] object obj, out IntPtr pidl);

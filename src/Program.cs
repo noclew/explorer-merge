@@ -10,7 +10,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("Explorer Merge")]
 [assembly: System.Reflection.AssemblyDescription("Merge File Explorer windows into native tabs. No installation or background service.")]
-[assembly: System.Reflection.AssemblyVersion("0.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.2.0.0")]
 namespace ExplorerMerge
 {
     static class Program
@@ -46,10 +46,13 @@ namespace ExplorerMerge
                         }
                         string only = Option(args, "--windows");
                         List<IntPtr> requested = only == null ? null : only.Split(',').Select(s => new IntPtr(Int64.Parse(s))).ToList();
+                        var elapsed = System.Diagnostics.Stopwatch.StartNew();
                         merger.Merge(requested);
+                        elapsed.Stop();
                         if (report != null)
                             new XDocument(new XElement("result", new XAttribute("closedWindows", merger.ClosedWindows),
                                 new XAttribute("copiedTabs", merger.CopiedTabs), new XAttribute("skippedWindows", merger.SkippedWindows),
+                                new XAttribute("elapsedMilliseconds", elapsed.ElapsedMilliseconds), new XAttribute("folderReads", merger.FolderReads),
                                 merger.Errors.Select(e => new XElement("error", e)))).Save(report);
                         if ((merger.Errors.Count > 0 || merger.SkippedWindows > 0) && report == null)
                             MessageBox.Show("Some windows were kept open because their tabs could not be safely verified.\n\n" +

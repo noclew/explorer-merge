@@ -6,6 +6,8 @@ A small, free Windows 11 utility that reopens the tabs from separate File Explor
 
 No installer. No background service. No third-party runtime. No network access. MIT licensed.
 
+<img src="assets/ExplorerMerge-character.png" width="160" alt="Explorer Merge character holding a folder">
+
 ## 日本語
 
 散らばったエクスプローラーを、クリック1回で1つのウィンドウにまとめます。
@@ -24,6 +26,7 @@ No installer. No background service. No third-party runtime. No network access. 
 - 現在の仮想デスクトップで手前にある、読み取り可能なウィンドウを結合先にします。最小化されたウィンドウも対象です。他の仮想デスクトップのウィンドウは対象外です。
 - 元の各ウィンドウの全タブを開き直し、移し先の場所と元タブの状態を確認してから元ウィンドウを閉じます。確認できない場合は処理を止め、未処理の元ウィンドウを残します。
 - 同じフォルダーを開いていたタブも、その数だけ残します。
+- 結合中は結合先を一時的に最小化し、終了時に戻します。タブごとの画面切り替えを抑え、必要なタブだけを確認しながら複数フォルダーを読み込みます。
 - **タブの「場所」を開き直す方式です。戻る・進むの履歴、選択中のファイル、スクロール位置、タブの並び順は引き継ぎません。**
 - 実行中はエクスプローラーの操作を止め、完了まで数秒待ってください。大量のタブや遅い場所では長くかかります。
 - 読み込み中・応答しないフォルダーや、一部の特殊フォルダーはまとめられない場合があります。エラー時には、新しく作ったタブが残る場合があります。
@@ -53,6 +56,14 @@ Every source window must have a complete readable tab snapshot. Each new tab's l
 
 Some shell namespaces, loading folders, unavailable network locations, Explorer extensions and future Windows builds may be unsupported. Tab creation uses an undocumented Explorer command. No `explorer.exe` processes are terminated, and no global keyboard input is injected.
 
+### Performance (v0.2.0)
+
+The destination is temporarily minimized during merging and restored on both success and failure. The program caches tab COM objects, navigates as soon as a new tab is registered instead of waiting for Home to finish loading, overlaps folder loads, and verifies only relevant locations. It no longer repeatedly reads every folder in every Explorer window while polling. Location checks before closing source windows remain in place.
+
+This still reopens locations; it does not transplant live tabs or eliminate filesystem enumeration. Slow storage, network folders and Explorer extensions can still affect completion time.
+
+On one Windows 11 25H2 desktop, six test windows containing 100 files per folder merged in **42.0 seconds with v0.1.0 versus 4.7–6.4 seconds with v0.2.0** (one baseline run, two optimized runs). These are observed desktop timings, not a guaranteed speedup on every PC. The benchmark verifies the complete set of locations and source-window closure.
+
 ### Build and test
 
 ```powershell
@@ -60,9 +71,13 @@ Some shell namespaces, loading folders, unavailable network locations, Explorer 
 .\Test.ps1
 # Opens and closes only test-created Explorer windows; requires an interactive desktop:
 .\Test.ps1 -Integration
+# Six test windows with 100 files per folder; measures merge time only:
+.\Test.ps1 -Benchmark
 ```
 
 Build uses the C# compiler and .NET Framework included with 64-bit Windows. It requires no NuGet packages or SDK downloads. The executable is unsigned. CI builds the executable and runs the safety-policy tests; native Explorer integration must be tested on a real desktop.
+
+The character icon is based on original artwork by aoe1928, adapted with image generation. `tools/PackIcon.ps1` packages the selected PNG into the multi-resolution ICO used by the build; the original geometric icon is retained in `assets/ExplorerMerge.ico`.
 
 Diagnostic options (intended for development):
 
