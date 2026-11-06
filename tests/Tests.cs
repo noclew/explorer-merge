@@ -44,12 +44,15 @@ static class Tests
     static IntPtr Open(object shell, string path, Merger merger)
     {
         var before = Native.Windows();
-        ((dynamic)shell).Explore(path);
+        Process.Start("explorer.exe", "/n,\"" + path + "\"");
         var timer = Stopwatch.StartNew();
         while (timer.ElapsedMilliseconds < 12000)
         {
             var added = Native.Windows().Except(before).ToList();
-            if (added.Count == 1 && merger.Snapshot(added).Any(t => t.Window == added[0])) return added[0];
+            string expected = path.StartsWith("shell:", StringComparison.Ordinal) ? path.Substring(6) : path;
+            var owned = merger.Snapshot(added).Where(t => t.Path == expected).ToList();
+            // Never claim an unrelated window opened by the user during a test.
+            if (owned.Count == 1) return owned[0].Window;
             Merger.Pause();
         }
         throw new Exception("Test Explorer window did not open.");
@@ -118,6 +121,100 @@ static class Tests
         finally { CloseTestWindows(opened); Marshal.ReleaseComObject(shell); }
 #endif
     }
+    static void RecoveryTests()
+    {
+#if TESTING
+        foreach (string scenario in new[] { "transient-start", "unreadable-start", "failed-copy", "transient-final", "source-changed", "copy-changed" })
+        {
+            string root = Path.Combine(Path.GetTempPath(), "ExplorerMerge-Test-" + Guid.NewGuid().ToString("N"));
+            var paths = new[] { "Destination", "Problem", "Healthy", "Changed" }.Select(p => Path.Combine(root, p)).ToArray();
+            foreach (var path in paths) Directory.CreateDirectory(path);
+            var opened = new List<IntPtr>();
+            object shell = Activator.CreateInstance(Type.GetTypeFromProgID("Shell.Application"));
+            try
+            {
+                using (var merger = new Merger())
+                {
+                    foreach (var path in paths.Take(3)) opened.Add(Open(shell, path, merger));
+                    IntPtr problemTab = merger.Snapshot(new[] { opened[1] }).Single().Handle;
+                    int unreadableCalls = 0;
+                    bool readyWindowClosedBeforeTimeout = false;
+                    if (scenario == "transient-start")
+                        merger.UnreadableForTest = h => h == problemTab && ++unreadableCalls <= 2;
+                    if (scenario == "unreadable-start")
+                    {
+                        merger.InitialWaitMilliseconds = 250;
+                        merger.UnreadableForTest = h => h == problemTab;
+                    }
+                    if (scenario == "failed-copy")
+                    {
+                        merger.CopyWaitMilliseconds = 2000;
+                        merger.UnverifiedForTest = w => {
+                            if (!Native.IsWindow(opened[2])) readyWindowClosedBeforeTimeout = true;
+                            return w == opened[1];
+                        };
+                    }
+                    if (scenario == "transient-final")
+                        merger.BeforeCopyVerificationForTest = delegate {
+                            merger.UnreadableForTest = h => h == problemTab && ++unreadableCalls <= 2;
+                        };
+                    if (scenario == "source-changed" || scenario == "copy-changed")
+                        merger.BeforeCopyVerificationForTest = delegate {
+                            IntPtr frame = scenario == "source-changed" ? opened[1] : opened[0];
+                            var timer = Stopwatch.StartNew();
+                            Tab target = null;
+                            while (timer.ElapsedMilliseconds < 5000 && target == null)
+                            {
+                                target = merger.Snapshot(new[] { frame }).FirstOrDefault(t => t.Path == paths[1]);
+                                Merger.Pause();
+                            }
+                            if (target == null) throw new Exception("Test navigation target not ready.");
+                            object windows = ((dynamic)shell).Windows();
+                            try
+                            {
+                                for (int i = 0; i < (int)((dynamic)windows).Count; i++)
+                                {
+                                    object browser = ((dynamic)windows).Item(i);
+                                    try
+                                    {
+                                        if (Merger.TabHandle(browser) == target.Handle)
+                                            ((dynamic)browser).Navigate2(paths[3]);
+                                    }
+                                    finally { Marshal.ReleaseComObject(browser); }
+                                }
+                            }
+                            finally { Marshal.ReleaseComObject(windows); }
+                            timer.Restart();
+                            while (!merger.Snapshot(new[] { frame }).Any(t => t.Handle == target.Handle && t.Path == paths[3]))
+                            {
+                                if (timer.ElapsedMilliseconds > 5000) throw new Exception("Test navigation timed out.");
+                                Merger.Pause();
+                            }
+                            merger.CopyWaitMilliseconds = 1500;
+                        };
+                    merger.Merge(opened);
+                    Check(!Native.IsWindow(opened[2]), scenario + ": healthy source still merges");
+                    bool recovered = scenario == "transient-start" || scenario == "transient-final";
+                    Check(Native.IsWindow(opened[1]) != recovered, scenario + ": problem source closes only after recovery");
+                    Check(merger.Errors.Count == (recovered ? 0 : 1), scenario + ": exact failure count");
+                    Check(merger.SkippedWindows == (recovered ? 0 : 1), scenario + ": exact skipped count");
+                    var destination = merger.Snapshot(new[] { opened[0] });
+                    Check(destination.Any(t => t.Path == paths[2]), scenario + ": healthy copy verified");
+                    if (scenario == "failed-copy")
+                    {
+                        Check(readyWindowClosedBeforeTimeout, "Healthy window finishes while failed copy is still waiting");
+                        Check(Program.ResultMessage(merger).Contains("Timed out verifying"), "Dialog includes the specific failure reason");
+                    }
+                    if (recovered) Check(destination.Any(t => t.Path == paths[1]), scenario + ": recovered copy verified");
+                    merger.Merge(new List<IntPtr> { opened[0] });
+                    Check(merger.ClosedWindows == 0 && merger.SkippedWindows == 0 && merger.Errors.Count == 0,
+                        scenario + ": subsequent no-op clears previous results");
+                }
+            }
+            finally { CloseTestWindows(opened); Marshal.ReleaseComObject(shell); }
+        }
+#endif
+    }
     static void Benchmark()
     {
         string root = Path.Combine(Path.GetTempPath(), "ExplorerMerge-Test-" + Guid.NewGuid().ToString("N"));
@@ -153,6 +250,35 @@ static class Tests
             Marshal.ReleaseComObject(shell);
         }
     }
+    static void ShellFolderIntegration()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "ExplorerMerge-Test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        object shell = Activator.CreateInstance(Type.GetTypeFromProgID("Shell.Application"));
+        var opened = new List<IntPtr>();
+        try
+        {
+            object folder = ((dynamic)shell).NameSpace((int)Environment.SpecialFolder.MyComputer);
+            string path;
+            try
+            {
+                object item = ((dynamic)folder).Self;
+                try { path = (string)((dynamic)item).Path; }
+                finally { Marshal.ReleaseComObject(item); }
+            }
+            finally { Marshal.ReleaseComObject(folder); }
+            using (var merger = new Merger())
+            {
+                opened.Add(Open(shell, root, merger));
+                opened.Add(Open(shell, "shell:" + path, merger));
+                merger.Merge(opened);
+                Check(merger.Errors.Count == 0, "This PC shell namespace merges successfully");
+                Check(merger.Snapshot(new[] { opened[0] }).Any(t => t.Path == path), "This PC location survives PIDL navigation");
+                Check(!Native.IsWindow(opened[1]), "Verified shell namespace source closes");
+            }
+        }
+        finally { CloseTestWindows(opened); Marshal.ReleaseComObject(shell); }
+    }
     [STAThread]
     static int Main(string[] args)
     {
@@ -167,7 +293,7 @@ static class Tests
                             Path.Combine(Path.GetTempPath(), "ExplorerMerge-Test-"), StringComparison.OrdinalIgnoreCase)))
                             Native.PostMessage(group.Key, 0x112, new IntPtr(0xF060), IntPtr.Zero);
             }
-            if (args.Contains("--integration")) { Integration(); FailureRestoration(); }
+            if (args.Contains("--integration")) { Integration(); FailureRestoration(); RecoveryTests(); ShellFolderIntegration(); }
             if (args.Contains("--benchmark")) Benchmark();
             Console.WriteLine(checks + " checks passed.");
             return 0;

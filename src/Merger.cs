@@ -40,6 +40,11 @@ namespace ExplorerMerge
         internal int FolderReads;
 #if TESTING
         internal Action BeforeCopyVerificationForTest;
+        internal Func<IntPtr, bool> UnreadableForTest;
+        internal Func<IntPtr, bool> UnverifiedForTest;
+        internal int InitialWaitMilliseconds = 2000, CopyWaitMilliseconds = 12000;
+#else
+        const int InitialWaitMilliseconds = 2000, CopyWaitMilliseconds = 12000;
 #endif
         internal int ClosedWindows, CopiedTabs, SkippedWindows;
         internal readonly List<string> Errors = new List<string>();
@@ -69,6 +74,9 @@ namespace ExplorerMerge
         Tab Read(object browser, IntPtr handle, bool includePidl)
         {
             if (Native.ClassName(handle) != "ShellTabWindowClass") return null;
+#if TESTING
+            if (UnreadableForTest != null && UnreadableForTest(handle)) return null;
+#endif
             object document = null, folder = null, item = null;
             try
             {
@@ -88,7 +96,9 @@ namespace ExplorerMerge
         {
             var result = new List<Tab>();
             var selected = onlyWindows == null ? null : new HashSet<IntPtr>(onlyWindows);
-            int count = (int)((dynamic)windows).Count;
+            int count;
+            try { count = (int)((dynamic)windows).Count; }
+            catch (COMException) { return result; }
             for (int i = 0; i < count; i++)
             {
                 object browser = null;
@@ -119,7 +129,9 @@ namespace ExplorerMerge
         {
             object cached;
             if (browsers.TryGetValue(handle, out cached)) return cached;
-            int count = (int)((dynamic)windows).Count;
+            int count;
+            try { count = (int)((dynamic)windows).Count; }
+            catch (COMException) { return null; }
             // New ShellWindows entries normally appear at the end. Do not read
             // unrelated folder contents merely to locate a new tab's COM object.
             for (int i = count - 1; i >= 0; i--)
@@ -141,6 +153,7 @@ namespace ExplorerMerge
                         return cached;
                     }
                 }
+                catch (COMException) { } // ShellWindows can change during enumeration.
                 finally { Release(browser); }
             }
             return null;
@@ -158,10 +171,23 @@ namespace ExplorerMerge
         {
             return tabs.Select(t => ReadKnown(t.Handle, false)).Where(t => t != null).ToList();
         }
-        internal static void Pause()
+        List<Tab> ReadForVerification(IEnumerable<Tab> tabs)
+        {
+            var expected = tabs.ToList();
+            var timer = Stopwatch.StartNew();
+            while (true)
+            {
+                var current = ReadKnown(expected);
+                if (current.Count == expected.Count || timer.ElapsedMilliseconds >= 750 ||
+                    expected.Any(t => !Native.IsWindow(t.Handle) || Native.GetAncestor(t.Handle, 2) != t.Window))
+                    return current;
+                Pause(75);
+            }
+        }
+        internal static void Pause(int milliseconds = 25)
         {
             Application.DoEvents();
-            Thread.Sleep(25);
+            Thread.Sleep(milliseconds);
         }
         static bool Complete(IntPtr window, IList<Tab> tabs)
         {
@@ -174,6 +200,36 @@ namespace ExplorerMerge
             internal Tab Source;
             internal IntPtr Handle, Destination;
             internal Tab Verified;
+        }
+        sealed class SourceGroup
+        {
+            internal IntPtr Window;
+            internal List<Tab> Originals;
+            internal readonly List<PendingCopy> Copies = new List<PendingCopy>();
+        }
+
+        List<Tab> InitialSnapshot(List<IntPtr> visible)
+        {
+            var result = Snapshot(visible);
+            var timer = Stopwatch.StartNew();
+            while (timer.ElapsedMilliseconds < InitialWaitMilliseconds)
+            {
+                var missing = visible.Where(w => !Complete(w, result.Where(t => t.Window == w).ToList())).ToList();
+                if (missing.Count == 0) break;
+                Pause(100);
+                // Only retry incomplete frames. Do not repeatedly read every folder.
+                result.RemoveAll(t => missing.Contains(t.Window));
+                result.AddRange(Snapshot(missing));
+            }
+            return result;
+        }
+
+        void RecordFailure(IntPtr window, Exception error)
+        {
+            string reason = error is COMException
+                ? "Explorer communication failed (0x" + error.HResult.ToString("X8") + ")."
+                : error.Message;
+            Errors.Add(Native.WindowTitle(window) + ": " + reason);
         }
         PendingCopy BeginCopy(Tab source, IntPtr destination)
         {
@@ -204,34 +260,75 @@ namespace ExplorerMerge
             ((dynamic)browser).Navigate2((object)source.Pidl);
             return new PendingCopy { Source = source, Handle = added, Destination = destination };
         }
-        void WaitForCopies(List<PendingCopy> pending)
+        void FinishCopies(List<SourceGroup> groups)
         {
             var timer = Stopwatch.StartNew();
-            while (timer.ElapsedMilliseconds < 12000)
+            while (groups.Count > 0)
             {
-                foreach (var copy in pending.Where(p => p.Verified == null))
+                foreach (var group in groups.ToArray())
                 {
-                    var tab = ReadKnown(copy.Handle, false);
-                    if (tab != null && tab.Window == copy.Destination && tab.Path == copy.Source.Path)
+                    foreach (var copy in group.Copies.Where(p => p.Verified == null))
                     {
-                        copy.Verified = tab;
-                        CopiedTabs++;
+                        var tab = ReadKnown(copy.Handle, false);
+#if TESTING
+                        if (UnverifiedForTest != null && UnverifiedForTest(group.Window)) tab = null;
+#endif
+                        if (tab != null && tab.Window == copy.Destination && tab.Path == copy.Source.Path)
+                        {
+                            copy.Verified = tab;
+                            CopiedTabs++;
+                        }
                     }
+                    if (group.Copies.Any(p => p.Verified == null)) continue;
+                    // A slow or unsupported folder must not block verified windows.
+                    try { CloseVerifiedSource(group); }
+                    catch (Exception e) { RecordFailure(group.Window, e); }
+                    groups.Remove(group);
                 }
-                if (pending.All(p => p.Verified != null)) return;
-                Pause();
+                if (groups.Count == 0) return;
+                if (timer.ElapsedMilliseconds >= CopyWaitMilliseconds) break;
+                // Waiting on navigation needs less polling than creating a tab.
+                Pause(75);
             }
-            // Leave both original and destination open on any uncertain outcome.
-            throw new TimeoutException("The new tab could not be verified. Original window was kept open.");
+            foreach (var group in groups)
+                RecordFailure(group.Window, new TimeoutException("Timed out verifying " +
+                    group.Copies.Count(p => p.Verified == null) + " new tab(s). Original window was kept open."));
+        }
+
+        void CloseVerifiedSource(SourceGroup group)
+        {
+            var copies = group.Copies.Select(p => p.Verified).ToList();
+            var current = ReadForVerification(group.Originals.Concat(copies));
+            var sourceNow = current.Where(t => t.Window == group.Window).ToList();
+            if (!Complete(group.Window, sourceNow) || !MergePolicy.SameTabs(group.Originals, sourceNow) ||
+                !MergePolicy.CopiesMatch(group.Originals, copies, current))
+                throw new InvalidOperationException("Tabs changed or became unreadable during verification. Original window was kept open.");
+            // SC_CLOSE closes the verified frame; automation Quit can close only a tab.
+            if (!Native.PostMessage(group.Window, 0x112, new IntPtr(0xF060), IntPtr.Zero))
+                throw new InvalidOperationException("Explorer rejected the window-close request.");
+            var timer = Stopwatch.StartNew();
+            while (Native.IsWindow(group.Window) && timer.ElapsedMilliseconds < 5000) Pause();
+            if (Native.IsWindow(group.Window)) throw new TimeoutException("Explorer kept the source window open.");
+            foreach (var original in group.Originals)
+            {
+                object closed;
+                if (browsers.TryGetValue(original.Handle, out closed)) Release(closed);
+                browsers.Remove(original.Handle);
+            }
+            ClosedWindows++;
         }
         internal void Merge(List<IntPtr> requested)
         {
+            ClosedWindows = CopiedTabs = SkippedWindows = 0;
+            Errors.Clear();
             var visible = Native.Windows();
             if (requested != null) visible = requested.Where(h => visible.Contains(h)).Distinct().ToList();
             if (visible.Count < 2) return;
-            var initial = Snapshot(visible);
+            var initial = InitialSnapshot(visible);
             var eligible = visible.Where(w => Complete(w, initial.Where(t => t.Window == w).ToList())).ToList();
             SkippedWindows += visible.Count - eligible.Count;
+            foreach (var window in visible.Except(eligible))
+                RecordFailure(window, new InvalidOperationException("Could not read all tabs after waiting for Explorer. Window was kept open."));
             if (eligible.Count < 2) return;
             IntPtr destination = eligible[0];
             bool wasMaximized = Native.IsZoomed(destination);
@@ -240,53 +337,34 @@ namespace ExplorerMerge
             if (!Native.IsIconic(destination)) Native.ShowWindow(destination, 7);
             try
             {
-                var pending = new List<PendingCopy>();
+                var groups = new List<SourceGroup>();
                 foreach (var sourceWindow in eligible.Skip(1))
                 {
-                    var originals = initial.Where(t => t.Window == sourceWindow).ToList();
-                    var now = ReadKnown(originals);
-                    if (!Complete(sourceWindow, now) || !MergePolicy.SameTabs(originals, now))
-                        throw new InvalidOperationException("Source tabs changed before merging.");
-                    foreach (var original in originals) pending.Add(BeginCopy(original, destination));
+                    try
+                    {
+                        var originals = initial.Where(t => t.Window == sourceWindow).ToList();
+                        var now = ReadForVerification(originals);
+                        if (!Complete(sourceWindow, now) || !MergePolicy.SameTabs(originals, now))
+                            throw new InvalidOperationException("Source tabs changed or became unreadable before merging.");
+                        var group = new SourceGroup { Window = sourceWindow, Originals = originals };
+                        foreach (var original in originals) group.Copies.Add(BeginCopy(original, destination));
+                        groups.Add(group);
+                    }
+                    catch (Exception e) { RecordFailure(sourceWindow, e); }
                 }
-                // Folder loads overlap. No source is closed until every requested
-                // copy has reached its expected location.
+                // Folder loads overlap; each source is independently verified.
 #if TESTING
                 if (BeforeCopyVerificationForTest != null) BeforeCopyVerificationForTest();
 #endif
-                WaitForCopies(pending);
-                foreach (var sourceWindow in eligible.Skip(1))
-                {
-                    var originals = initial.Where(t => t.Window == sourceWindow).ToList();
-                    var copies = pending.Where(p => p.Source.Window == sourceWindow).Select(p => p.Verified).ToList();
-                    var current = ReadKnown(originals.Concat(copies));
-                    var sourceNow = current.Where(t => t.Window == sourceWindow).ToList();
-                    if (!Complete(sourceWindow, sourceNow) || !MergePolicy.SameTabs(originals, sourceNow) ||
-                        !MergePolicy.CopiesMatch(originals, copies, current))
-                        throw new InvalidOperationException("Tabs changed during verification. Original window was kept open.");
-                    // SC_CLOSE is the title-bar Close action. WM_CLOSE and the
-                    // shell automation Quit method can close only the active tab.
-                    if (!Native.PostMessage(sourceWindow, 0x112, new IntPtr(0xF060), IntPtr.Zero))
-                        throw new InvalidOperationException("Explorer rejected the window-close request.");
-                    var timer = Stopwatch.StartNew();
-                    while (Native.IsWindow(sourceWindow) && timer.ElapsedMilliseconds < 5000) Pause();
-                    if (Native.IsWindow(sourceWindow)) throw new TimeoutException("Explorer kept the source window open.");
-                    foreach (var original in originals)
-                    {
-                        object closed;
-                        if (browsers.TryGetValue(original.Handle, out closed)) Release(closed);
-                        browsers.Remove(original.Handle);
-                    }
-                    ClosedWindows++;
-                }
+                FinishCopies(groups);
             }
             catch (Exception e)
             {
-                SkippedWindows += eligible.Skip(1).Count(Native.IsWindow);
-                Errors.Add(e is COMException ? "Explorer communication failed; remaining source windows kept." : e.Message);
+                RecordFailure(destination, e);
             }
             finally
             {
+                SkippedWindows += eligible.Skip(1).Count(Native.IsWindow);
                 if (Native.IsWindow(destination))
                 {
                     Native.ShowWindow(destination, wasMaximized ? 3 : 9);

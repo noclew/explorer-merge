@@ -21,6 +21,7 @@ namespace ExplorerMerge
         [DllImport("user32.dll")] internal static extern bool EnumWindows(EnumProc proc, IntPtr data);
         [DllImport("user32.dll")] internal static extern bool EnumChildWindows(IntPtr parent, EnumProc proc, IntPtr data);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern int GetClassName(IntPtr hwnd, StringBuilder text, int count);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int count);
         [DllImport("user32.dll")] internal static extern bool IsWindow(IntPtr hwnd);
         [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr hwnd);
         [DllImport("user32.dll")] internal static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
@@ -39,6 +40,12 @@ namespace ExplorerMerge
             var text = new StringBuilder(256);
             GetClassName(hwnd, text, text.Capacity);
             return text.ToString();
+        }
+        internal static string WindowTitle(IntPtr hwnd)
+        {
+            var text = new StringBuilder(160);
+            GetWindowText(hwnd, text, text.Capacity);
+            return text.Length == 0 ? "Explorer window" : text.ToString();
         }
         internal static List<IntPtr> Windows()
         {

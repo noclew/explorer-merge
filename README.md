@@ -6,6 +6,30 @@ A small, free Windows 11 utility that reopens the tabs from separate File Explor
 
 No installer. No background service. No third-party runtime. No network access. MIT licensed.
 
+## Reliability update (v0.3.0, local build)
+
+- Incomplete window snapshots are retried for up to two seconds; readable windows are not repeatedly rescanned.
+- Briefly unreadable tabs get up to 750 ms to recover during final verification. Closed, moved, or navigated tabs still prevent source closure.
+- Each source window is verified independently. A failed or slow copy keeps its own source open while verified windows can finish; one failed folder no longer prevents all other sources from closing.
+- Navigation polling uses 75 ms intervals instead of 25 ms. Folder loads still overlap, and tab registration keeps its faster polling.
+- Partial-result dialogs show counts, window titles, and failure reasons. They also explain that retrying may duplicate already-created tabs.
+- Diagnostic error handling no longer reparses a missing `--report` argument or crashes again when writing an error report fails.
+
+The executable is still `ExplorerMerge.exe`. To update, keep a backup of your previous executable and replace it at the same location; existing shortcuts continue to work. This is a locally built update, not a published GitHub release.
+
+### Validation on Windows 11 build 26300
+
+The extended live tests cover transient and persistent read failures, copy timeouts, source/destination navigation during merging, duplicates, Unicode, special characters, and the This PC shell namespace. Test windows are matched to their requested locations so unrelated windows cannot be claimed by the test launcher.
+
+Six-window benchmarks (100 files per folder; merge time only):
+
+| Version | Three runs | Median |
+| --- | --- | --- |
+| Baseline v0.2.1 | 2.546 s, 3.433 s, 2.839 s | 2.839 s |
+| Updated v0.3.0 | 2.867 s, 2.681 s, 3.372 s | 2.867 s |
+
+These small samples show comparable ordinary merge speed, not a demonstrated speedup. The improvement is completing verified sources even when another copy fails, reducing the need to repeat the whole merge. The injected-timeout test verifies that a healthy window closes while the failed copy is still waiting. Network/UNC folders were not tested. Retry deadlines bound polling, not a blocked COM call.
+
 <img src="assets/ExplorerMerge-character.png" width="160" alt="Explorer Merge character holding a folder">
 
 [紹介ページ / App page](https://www.aoe1928.com/apps/)
@@ -26,7 +50,7 @@ No installer. No background service. No third-party runtime. No network access. 
 
 - Windows 11 22H2（ビルド22621）以降の、標準タブ付きエクスプローラーが必要です。
 - 現在の仮想デスクトップで手前にある、読み取り可能なウィンドウを結合先にします。最小化されたウィンドウも対象です。他の仮想デスクトップのウィンドウは対象外です。
-- 元の各ウィンドウの全タブを開き直し、移し先の場所と元タブの状態を確認してから元ウィンドウを閉じます。確認できない場合は処理を止め、未処理の元ウィンドウを残します。
+- 元の各ウィンドウの全タブを開き直し、移し先の場所と元タブの状態を確認してから元ウィンドウを閉じます。確認できないウィンドウは残し、確認できた他のウィンドウの結合は続行します。
 - 同じフォルダーを開いていたタブも、その数だけ残します。
 - 結合中は結合先を一時的に最小化し、終了時に戻します。タブごとの画面切り替えを抑え、必要なタブだけを確認しながら複数フォルダーを読み込みます。
 - **タブの「場所」を開き直す方式です。戻る・進むの履歴、選択中のファイル、スクロール位置、タブの並び順は引き継ぎません。**
@@ -54,7 +78,7 @@ Requires Windows 11 22H2 or later with native Explorer tabs. Runs as a normal us
 
 Folder locations and duplicate tabs are preserved. This **reopens locations**, rather than moving live tabs: navigation history, selected files, scroll positions and tab order are not preserved. Wait for the operation to finish before interacting with Explorer.
 
-Every source window must have a complete readable tab snapshot. Each new tab's location is checked before the source frame is closed, and source tabs are checked again for changes. An uncertain result stops processing and leaves remaining source windows open. New tabs may remain after a failure. These checks reduce accidental loss of locations; they do not make concurrent interaction atomic.
+Every source window must have a complete readable tab snapshot. Each new tab's location is checked before the source frame is closed, and source tabs are checked again for changes. An uncertain result leaves that source window open while other independently verified sources can finish. New tabs may remain after a failure, so inspect them before retrying. These checks reduce accidental loss of locations; they do not make concurrent interaction atomic.
 
 Some shell namespaces, loading folders, unavailable network locations, Explorer extensions and future Windows builds may be unsupported. Tab creation uses an undocumented Explorer command. No `explorer.exe` processes are terminated, and no global keyboard input is injected.
 
@@ -88,7 +112,7 @@ ExplorerMerge.exe --inspect snapshot.xml
 ExplorerMerge.exe --windows 123456,234567 --report result.xml
 ```
 
-`--inspect` explicitly exports local folder paths and window handles. Do not upload this file without reviewing it. Normal execution writes no diagnostic files and sends nothing over the network. `--windows` limits merging to the specified current, eligible window handles, with the first as the destination. Exit codes: 0 success/no-op, 1 fatal error, 2 partial/skipped operation.
+`--inspect` explicitly exports local folder paths and window handles. Reports can contain window titles. Do not upload diagnostic files without reviewing them. Normal execution writes no diagnostic files and sends nothing over the network. `--windows` limits merging to the specified current, eligible window handles, with the first readable one as the destination. Exit codes: 0 success/no-op, 1 fatal error, 2 partial/skipped operation.
 
 ### Contributing
 

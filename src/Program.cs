@@ -10,7 +10,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("Explorer Merge")]
 [assembly: System.Reflection.AssemblyDescription("Merge File Explorer windows into native tabs. No installation or background service.")]
-[assembly: System.Reflection.AssemblyVersion("0.2.1.0")]
+[assembly: System.Reflection.AssemblyVersion("0.3.0.0")]
 namespace ExplorerMerge
 {
     static class Program
@@ -24,9 +24,10 @@ namespace ExplorerMerge
             using (var mutex = new Mutex(true, @"Local\ExplorerMerge.Portable", out acquired))
             {
                 if (!acquired) return 0;
+                string report = null;
                 try
                 {
-                    string report = Option(args, "--report");
+                    report = Option(args, "--report");
                     string inspect = Option(args, "--inspect");
                     using (var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
                     {
@@ -55,21 +56,35 @@ namespace ExplorerMerge
                                 new XAttribute("elapsedMilliseconds", elapsed.ElapsedMilliseconds), new XAttribute("folderReads", merger.FolderReads),
                                 merger.Errors.Select(e => new XElement("error", e)))).Save(report);
                         if ((merger.Errors.Count > 0 || merger.SkippedWindows > 0) && report == null)
-                            MessageBox.Show("Some windows were kept open because their tabs could not be safely verified.\n\n" +
-                                "Please wait for folders to finish loading and try again without using Explorer during the merge.",
+                            MessageBox.Show(ResultMessage(merger),
                                 "Explorer Merge", MessageBoxButtons.OK, MessageBoxIcon.Information);
                         return merger.Errors.Count > 0 || merger.SkippedWindows > 0 ? 2 : 0;
                     }
                 }
                 catch (Exception e)
                 {
-                    string report = Option(args, "--report");
-                    if (report != null) new XDocument(new XElement("result", new XElement("error", e.GetType().Name + ": " + e.Message))).Save(report);
-                    else MessageBox.Show("Explorer Merge could not finish.\n\n" + e.Message, "Explorer Merge", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    if (report != null)
+                    {
+                        try { new XDocument(new XElement("result", new XElement("error", e.GetType().Name + ": " + e.Message))).Save(report); }
+                        catch (Exception writeError) { ShowError(e.Message + "\n\nCould not write the report: " + writeError.Message); }
+                    }
+                    else ShowError(e.Message);
                     return 1;
                 }
                 finally { mutex.ReleaseMutex(); }
             }
+        }
+        static void ShowError(string message)
+        {
+            MessageBox.Show("Explorer Merge could not finish.\n\n" + message, "Explorer Merge", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        internal static string ResultMessage(Merger merger)
+        {
+            return "Merged " + merger.ClosedWindows + " window(s); kept " + merger.SkippedWindows + " window(s) open.\n\n" +
+                String.Join("\n", merger.Errors.Take(5)) +
+                (merger.Errors.Count > 5 ? "\nAdditional windows could not be merged." : "") +
+                "\n\nWait for folders to load and leave Explorer alone during the merge. " +
+                "New tabs may already exist; check them before retrying to avoid duplicates.";
         }
         static string Option(string[] args, string name)
         {
